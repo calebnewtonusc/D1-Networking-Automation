@@ -36,5 +36,6 @@ export function findLatestLinkedInCsv(): string | null {
   }
 
   walk(downloads);
-  return best?.path ?? null;
+  const found = best as { path: string; mtime: number } | null;
+  return found?.path ?? null;
 }

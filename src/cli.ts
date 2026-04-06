@@ -144,9 +144,6 @@ if (command === "sync" || !command) {
   const { mergeRecords } = await import("./core/merge.js");
   const { postToClay } = await import("./core/clay.js");
   const { loadConfig, saveConfig } = await import("./core/config.js");
-  const { PersonRecord } = await import("./core/types.js").catch(() => ({
-    PersonRecord: null,
-  }));
 
   const config = loadConfig();
   const webhookUrl =
