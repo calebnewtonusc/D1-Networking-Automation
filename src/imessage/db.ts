@@ -94,7 +94,7 @@ export interface DBConversationSession {
   context_summary: string | null;
   turn_count: number;
   preferences: {
-    format?: "list" | "narrative" | "brief";
+    format?: "list" | "narrative" | "brief" | "detailed";
     tone?: "casual" | "formal" | "warm";
     emoji?: boolean;
     length?: "short" | "medium" | "long";

@@ -1357,7 +1357,7 @@ async function runAgent(): Promise<void> {
                 .recordSent({
                   toHandle: handle,
                   message: finalReply,
-                  conversationMode: "gpt_chat",
+                  conversationMode: true,
                   sessionId: session.id,
                 })
                 .catch(() => {});
@@ -2258,7 +2258,7 @@ async function serverMode(): Promise<void> {
                 .recordSent({
                   toHandle: handle,
                   message: renderedConvo,
-                  conversationMode: "gpt_chat",
+                  conversationMode: true,
                   sessionId: session.id,
                 })
                 .catch(() => {});
