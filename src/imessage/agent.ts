@@ -63,6 +63,14 @@ import {
   sendDigestToSlack,
   postSlack,
 } from "./integrations.ts";
+import { classifyIntent } from "./intent.ts";
+import {
+  generateConvoReply,
+  checkReplyQuality,
+  getOrBootstrapSession,
+  type ConvoContext,
+} from "./convo.ts";
+import { createAgentDB, type AgentDB } from "./db.ts";
 
 // ─── Args ──────────────────────────────────────────────────────────────────────
 
@@ -108,6 +116,18 @@ const CALEB_HANDLES = new Set([
 const sdk = new IMessageSDK({ debug: false });
 const memory = loadMemory();
 loadContacts(); // warm cache at startup — 50ms
+
+// Optional Supabase DB — initialized only when env vars are present.
+// Falls back to local memory.ts layer gracefully when not configured.
+let db: AgentDB | null = null;
+if (
+  process.env.SUPABASE_URL &&
+  process.env.SUPABASE_SERVICE_KEY &&
+  process.env.AGENT_USER_ID
+) {
+  db = createAgentDB(process.env.AGENT_USER_ID);
+  console.log("[db] Supabase layer active");
+}
 
 // ─── Name resolution ───────────────────────────────────────────────────────────
 
@@ -1297,8 +1317,70 @@ async function runAgent(): Promise<void> {
       }
     }
 
-    const reply = await generateReply(anthropic!, thread, contact, researchCtx);
-    if (!reply || !isSafe(reply)) {
+    // Check if contact is in GPT-chat mode before standard reply
+    let finalReply: string | null = null;
+    let isGptChat = false;
+
+    if (db && process.env.ANTHROPIC_API_KEY) {
+      try {
+        const dbContact = await db.getOrCreateContact(handle);
+        if (dbContact.conversation_mode === "gpt_chat") {
+          isGptChat = true;
+          const session = await getOrBootstrapSession(
+            dbContact,
+            process.env.AGENT_USER_ID!,
+            db,
+          );
+          const lastInbound = thread.findLast((m) => !m.isFromMe);
+          const incomingText = lastInbound?.text ?? "";
+          if (incomingText) {
+            const ctx: ConvoContext = {
+              user: {
+                display_name: "Caleb",
+                persona:
+                  "Caleb Newton, USC sophomore, serial entrepreneur, 20yo. Short texts, lowercase, no fluff.",
+                own_handles: [...CALEB_HANDLES],
+              },
+              contact: dbContact,
+              session,
+            };
+            const convoResult = await generateConvoReply(
+              incomingText,
+              ctx,
+              db,
+              process.env.ANTHROPIC_API_KEY,
+            );
+            const quality = checkReplyQuality(convoResult.text);
+            if (quality.ok && isSafe(convoResult.text)) {
+              finalReply = convoResult.text;
+              await db
+                .recordSent({
+                  toHandle: handle,
+                  message: finalReply,
+                  conversationMode: "gpt_chat",
+                  sessionId: session.id,
+                })
+                .catch(() => {});
+            }
+          }
+        }
+      } catch (err: any) {
+        // DB error — fall through to standard path
+        if (DEBUG) console.error(`[run] DB error: ${err.message}`);
+      }
+    }
+
+    if (!isGptChat) {
+      const candidate = await generateReply(
+        anthropic!,
+        thread,
+        contact,
+        researchCtx,
+      );
+      if (candidate && isSafe(candidate)) finalReply = candidate;
+    }
+
+    if (!finalReply) {
       const lastMsg = thread.findLast((m) => !m.isFromMe);
       addPendingQuestion(
         memory,
@@ -1318,15 +1400,24 @@ async function runAgent(): Promise<void> {
     }
 
     const p = t?.priority === 1 ? "🔴" : t?.priority === 2 ? "🟡" : "⚪";
-    console.log(`\n${p} [${name}] → "${reply}"`);
+    console.log(
+      `\n${p} [${name}]${isGptChat ? " [gpt_chat]" : ""} → "${finalReply}"`,
+    );
     console.log(`   ${t?.reason}`);
 
     if (!DRY_RUN) {
       try {
-        const formatted = renderForIMessage(reply);
+        const formatted = renderForIMessage(finalReply);
         await sdk.send(handle, formatted);
-        recordSent(memory, handle, formatted, t?.reason || "auto_reply", false);
-        updateContactAsync(anthropic!, handle, thread, formatted);
+        recordSent(
+          memory,
+          handle,
+          formatted,
+          t?.reason || (isGptChat ? "gpt_chat" : "auto_reply"),
+          false,
+        );
+        if (!isGptChat)
+          updateContactAsync(anthropic!, handle, thread, formatted);
         // Log outbound interaction to Firestore (fire-and-forget)
         logInteraction(
           handle,
@@ -1343,8 +1434,14 @@ async function runAgent(): Promise<void> {
         console.error(`   send failed: ${err.message}`);
       }
     } else {
-      const formatted = renderForIMessage(reply);
-      recordSent(memory, handle, formatted, t?.reason || "auto_reply", true);
+      const formatted = renderForIMessage(finalReply);
+      recordSent(
+        memory,
+        handle,
+        formatted,
+        t?.reason || (isGptChat ? "gpt_chat" : "auto_reply"),
+        true,
+      );
       sent++;
       console.log("   (dry run)");
     }
@@ -2043,6 +2140,20 @@ async function serverMode(): Promise<void> {
         const contact = getOrCreateContact(memory, handle);
         syncName(handle, contact);
 
+        // Intent classification — catch hard signals before LLM triage
+        const intent = classifyIntent(text);
+        if (intent.type === "stop") {
+          markAlwaysSkip(memory, handle, "user sent STOP");
+          saveMemory(memory);
+          if (db) {
+            await db
+              .markAlwaysSkip(handle, "stop intent from message")
+              .catch(() => {});
+          }
+          console.log(`[server] STOP from ${from} — marked always-skip`);
+          return;
+        }
+
         if (CRISIS_RE.test(text)) {
           console.log(
             `[server] Crisis signal from ${from}: "${text.slice(0, 100)}"`,
@@ -2103,6 +2214,68 @@ async function serverMode(): Promise<void> {
 
         // auto_reply
         if (!anthropic || _anthropicDead) return; // can't generate without Anthropic
+
+        // Check if this contact is in GPT-chat conversational mode
+        if (db && process.env.ANTHROPIC_API_KEY) {
+          try {
+            const dbContact = await db.getOrCreateContact(handle);
+            if (dbContact.conversation_mode === "gpt_chat") {
+              const session = await getOrBootstrapSession(
+                dbContact,
+                process.env.AGENT_USER_ID!,
+                db,
+              );
+              const ctx: ConvoContext = {
+                user: {
+                  display_name: "Caleb",
+                  persona:
+                    "Caleb Newton, USC sophomore, serial entrepreneur, 20yo. Short texts, lowercase, no fluff.",
+                  own_handles: [...CALEB_HANDLES],
+                },
+                contact: dbContact,
+                session,
+              };
+              const convoResult = await generateConvoReply(
+                text,
+                ctx,
+                db,
+                process.env.ANTHROPIC_API_KEY,
+              );
+              const quality = checkReplyQuality(convoResult.text);
+              if (!quality.ok || !isSafe(convoResult.text)) {
+                addPendingQuestion(
+                  memory,
+                  handle,
+                  text,
+                  "GPT-chat draft failed quality check",
+                );
+                saveMemory(memory);
+                return;
+              }
+              const renderedConvo = renderForIMessage(convoResult.text);
+              await sendViaLoop(from, renderedConvo, payload);
+              await db
+                .recordSent({
+                  toHandle: handle,
+                  message: renderedConvo,
+                  conversationMode: "gpt_chat",
+                  sessionId: session.id,
+                })
+                .catch(() => {});
+              recordSent(memory, handle, renderedConvo, "gpt_chat", false);
+              saveMemory(memory);
+              console.log(
+                `[server] gpt_chat reply to ${from}: "${renderedConvo.slice(0, 60)}"`,
+              );
+              return;
+            }
+          } catch (err: any) {
+            // DB error — fall through to standard reply path
+            console.error(`[server] DB error, falling back: ${err.message}`);
+          }
+        }
+
+        // Standard reply path
         const reply = await generateReply(anthropic, msgs, contact);
         if (!reply || !isSafe(reply)) return;
         const rendered = renderForIMessage(reply);
