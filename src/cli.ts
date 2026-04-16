@@ -3,27 +3,26 @@
  * D1 Networking Automation — unified CLI
  *
  * Commands:
- *   imessage  Full iMessage agent (scan, run, inbox, digest, chat, answer, send, skip)
- *   sync      Sync any combination of sources to Clay
- *   dedup     Remove duplicate rows from your Clay table (macOS, requires Clay open in Chrome)
- *
- * Examples:
- *   bun src/cli.ts imessage --mode scan
- *   bun src/cli.ts imessage --mode run --dry-run
- *   bun src/cli.ts sync --sources all
- *   bun src/cli.ts sync --sources linkedin                          (auto-finds Connections.csv in Downloads)
- *   bun src/cli.ts sync --sources linkedin --csv ~/Downloads/Connections.csv
- *   bun src/cli.ts sync --sources imessage
- *   bun src/cli.ts sync --sources contacts
- *   bun src/cli.ts sync --sources linkedin,imessage,contacts --dry-run
- *   bun src/cli.ts dedup
+ *   imessage          Full iMessage agent (scan, run, inbox, digest, chat, answer, send, skip)
+ *   sync              Sync LinkedIn/iMessage/Contacts to a registered Clay table
+ *   dedup             Remove duplicate rows from Clay table (macOS, Chrome)
+ *   tables add        Register a Clay webhook table
+ *   tables list       List all registered tables with usage
+ *   tables get        Get table details + usage
+ *   tables update     Update table config
+ *   tables remove     Remove a table
+ *   tables reset      Reset row counter + swap webhook URL
+ *   fire              Fire a JSON payload to a registered table
+ *   listen start      Start callback listener (local + cloudflared tunnel)
+ *   listen status     Check listener status
+ *   usage             Show row usage for all tables
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { platform } from "node:os";
+import { randomUUID } from "node:crypto";
 
-// Load .env automatically
 const envPath = resolve(process.cwd(), ".env");
 if (existsSync(envPath)) {
   for (const line of readFileSync(envPath, "utf-8").split("\n")) {
@@ -32,31 +31,416 @@ if (existsSync(envPath)) {
   }
 }
 
-const [, , command, ...rest] = process.argv;
+const [, , command, subcommand, ...rest] = process.argv;
 
-// ── imessage: delegate entirely to the agent ──────────────────────────────────
+// ── imessage ────────────────────────────────────────────────────────────────
 
 if (command === "imessage" || command === "agent") {
-  process.argv = [process.argv[0], process.argv[1], ...rest];
+  process.argv = [
+    process.argv[0],
+    process.argv[1],
+    ...(subcommand ? [subcommand, ...rest] : rest),
+  ];
   await import("./imessage/agent.js");
   process.exit(0);
 }
 
-// ── dedup: remove duplicate rows from Clay table ──────────────────────────────
+// ── tables ──────────────────────────────────────────────────────────────────
 
-if (command === "dedup") {
+if (command === "tables") {
   const chalk = (await import("chalk")).default;
+  const {
+    getTable,
+    addTable,
+    removeTable,
+    updateTable,
+    loadTables,
+    resetUsage,
+  } = await import("./core/tables.js");
+  const { getTableUsage } = await import("./core/usage.js");
 
-  if (platform() !== "darwin") {
+  const args = rest;
+  const getFlag = (f: string) => {
+    const i = args.indexOf(f);
+    return i !== -1 && i + 1 < args.length ? args[i + 1] : undefined;
+  };
+
+  if (subcommand === "add") {
+    const name = getFlag("--name") ?? getFlag("-n");
+    const webhookUrl = getFlag("--webhook-url") ?? getFlag("-w");
+    const authKey = getFlag("--auth-key") ?? getFlag("-k");
+    const description = getFlag("--description") ?? getFlag("-d");
+    const rowLimit = parseInt(getFlag("--row-limit") ?? "50000");
+
+    if (!name || !webhookUrl) {
+      console.error(chalk.red("Required: --name <name> --webhook-url <url>"));
+      process.exit(1);
+    }
+
+    if (getTable(name)) {
+      console.error(
+        chalk.red(`Table "${name}" already exists. Use "tables update".`),
+      );
+      process.exit(1);
+    }
+
+    addTable({
+      name,
+      webhookUrl,
+      authKey,
+      description,
+      createdAt: new Date().toISOString(),
+      rowLimit,
+    });
+    console.log(chalk.green(`Added table "${name}"`));
+    console.log(chalk.dim(`  Webhook: ${webhookUrl}`));
+    console.log(chalk.dim(`  Row limit: ${rowLimit}`));
+  } else if (subcommand === "list") {
+    const store = loadTables();
+    const tables = Object.values(store.tables);
+    if (tables.length === 0) {
+      console.log(chalk.yellow("No tables registered. Run: tables add"));
+      process.exit(0);
+    }
+    for (const t of tables) {
+      const usage = getTableUsage(t.name);
+      const pct = Math.round((usage.count / t.rowLimit) * 100);
+      console.log(
+        chalk.cyan(t.name) +
+          chalk.dim(` (${usage.count}/${t.rowLimit} rows, ${pct}%)`),
+      );
+      console.log(chalk.dim(`  ${t.webhookUrl}`));
+      if (t.description) console.log(chalk.dim(`  ${t.description}`));
+    }
+  } else if (subcommand === "get") {
+    const name = args[0];
+    if (!name) {
+      console.error(chalk.red("Usage: tables get <name>"));
+      process.exit(1);
+    }
+    const table = getTable(name);
+    if (!table) {
+      console.error(chalk.red(`Table "${name}" not found.`));
+      process.exit(1);
+    }
+    const usage = getTableUsage(name);
+    console.log(chalk.cyan(table.name));
+    console.log(`  Webhook:     ${table.webhookUrl}`);
+    if (table.authKey)
+      console.log(`  Auth key:    ${table.authKey.slice(0, 8)}...`);
+    if (table.description) console.log(`  Description: ${table.description}`);
+    console.log(`  Rows used:   ${usage.count}/${table.rowLimit}`);
+    console.log(`  Remaining:   ${table.rowLimit - usage.count}`);
+    if (usage.lastFired) console.log(`  Last fired:  ${usage.lastFired}`);
+  } else if (subcommand === "update") {
+    const name = args[0];
+    if (!name) {
+      console.error(
+        chalk.red(
+          "Usage: tables update <name> [--webhook-url] [--auth-key] [--description] [--row-limit]",
+        ),
+      );
+      process.exit(1);
+    }
+    const updates: Record<string, string | number | undefined> = {};
+    const wh = getFlag("--webhook-url") ?? getFlag("-w");
+    const ak = getFlag("--auth-key") ?? getFlag("-k");
+    const desc = getFlag("--description") ?? getFlag("-d");
+    const rl = getFlag("--row-limit");
+    if (wh) updates.webhookUrl = wh;
+    if (ak) updates.authKey = ak;
+    if (desc) updates.description = desc;
+    if (rl) updates.rowLimit = parseInt(rl);
+
+    const updated = updateTable(name, updates);
+    if (!updated) {
+      console.error(chalk.red(`Table "${name}" not found.`));
+      process.exit(1);
+    }
+    console.log(chalk.green(`Updated table "${name}"`));
+  } else if (subcommand === "remove") {
+    const name = args[0];
+    if (!name) {
+      console.error(chalk.red("Usage: tables remove <name>"));
+      process.exit(1);
+    }
+    if (!removeTable(name)) {
+      console.error(chalk.red(`Table "${name}" not found.`));
+      process.exit(1);
+    }
+    console.log(chalk.green(`Removed table "${name}"`));
+  } else if (subcommand === "reset") {
+    const name = args[0];
+    if (!name) {
+      console.error(
+        chalk.red("Usage: tables reset <name> --webhook-url <new-url>"),
+      );
+      process.exit(1);
+    }
+    const table = getTable(name);
+    if (!table) {
+      console.error(chalk.red(`Table "${name}" not found.`));
+      process.exit(1);
+    }
+    const newUrl = getFlag("--webhook-url") ?? getFlag("-w");
+    if (newUrl) updateTable(name, { webhookUrl: newUrl });
+    resetUsage(name, table.rowLimit);
+    console.log(chalk.green(`Reset row counter for "${name}" to 0`));
+    if (newUrl) console.log(chalk.dim(`  New webhook: ${newUrl}`));
+  } else {
+    console.error(chalk.red(`Unknown tables command: ${subcommand}`));
+    console.error("  add, list, get, update, remove, reset");
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+// ── fire ────────────────────────────────────────────────────────────────────
+
+if (command === "fire") {
+  const chalk = (await import("chalk")).default;
+  const { getTable, loadListenerState } = await import("./core/tables.js");
+  const { httpRequest } = await import("./core/client.js");
+  const { trackFire } = await import("./core/usage.js");
+
+  const tableName = subcommand;
+  const args = rest;
+  const getFlag = (f: string) => {
+    const i = args.indexOf(f);
+    return i !== -1 && i + 1 < args.length ? args[i + 1] : undefined;
+  };
+  const hasFlag = (f: string) => args.includes(f);
+
+  if (!tableName) {
     console.error(
       chalk.red(
-        "dedup requires macOS (uses AppleScript to interact with Clay in Chrome).",
+        "Usage: fire <table-name> --data '{...}' [--wait] [--timeout 120]",
       ),
     );
     process.exit(1);
   }
 
-  const args = rest;
+  const table = getTable(tableName);
+  if (!table) {
+    console.error(
+      chalk.red(`Table "${tableName}" not found. Run: tables list`),
+    );
+    process.exit(1);
+  }
+
+  const dataRaw = getFlag("--data") ?? getFlag("-d");
+  if (!dataRaw) {
+    console.error(chalk.red("Required: --data <json>"));
+    process.exit(1);
+  }
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(dataRaw);
+  } catch {
+    console.error(chalk.red("Invalid JSON in --data"));
+    process.exit(1);
+  }
+
+  const wait = hasFlag("--wait") || hasFlag("-w");
+  const timeout = parseInt(getFlag("--timeout") ?? getFlag("-t") ?? "120");
+  const callbackId = randomUUID();
+
+  if (wait) {
+    const listener = loadListenerState();
+    if (!listener) {
+      console.error(
+        chalk.red("No listener running. Start one first: listen start"),
+      );
+      process.exit(1);
+    }
+    try {
+      process.kill(listener.pid, 0);
+    } catch {
+      console.error(
+        chalk.red("Listener process is dead. Restart: listen start"),
+      );
+      process.exit(1);
+    }
+    payload._callback_url = `${listener.tunnelUrl}/callback/${callbackId}`;
+    payload._callback_id = callbackId;
+  }
+
+  const headers: Record<string, string> = {};
+  if (table.authKey) headers["Authorization"] = `Bearer ${table.authKey}`;
+
+  try {
+    await httpRequest({
+      url: table.webhookUrl,
+      method: "POST",
+      body: payload,
+      headers,
+    });
+    trackFire(tableName, table.rowLimit);
+
+    if (!wait) {
+      console.log(
+        chalk.green(`Fired to "${tableName}" (callback: ${callbackId})`),
+      );
+      process.exit(0);
+    }
+
+    const listener = loadListenerState()!;
+    const pollUrl = `http://localhost:${listener.port}/callback/${callbackId}`;
+    const deadline = Date.now() + timeout * 1000;
+    console.log(chalk.dim(`Waiting for callback (timeout: ${timeout}s)...`));
+
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(pollUrl);
+        if (res.ok) {
+          const body = (await res.json()) as Record<string, unknown>;
+          if (body && "payload" in body) {
+            console.log(chalk.green("Callback received:"));
+            console.log(JSON.stringify(body.payload, null, 2));
+            process.exit(0);
+          }
+        }
+      } catch {
+        // not ready yet
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    console.error(chalk.red(`Timed out after ${timeout}s`));
+    process.exit(1);
+  } catch (err) {
+    console.error(chalk.red(`Fire failed: ${(err as Error).message}`));
+    process.exit(1);
+  }
+}
+
+// ── listen ──────────────────────────────────────────────────────────────────
+
+if (command === "listen") {
+  const chalk = (await import("chalk")).default;
+  const { saveListenerState, loadListenerState } =
+    await import("./core/tables.js");
+
+  if (subcommand === "status") {
+    const state = loadListenerState();
+    if (!state) {
+      console.log(chalk.yellow("No listener running."));
+      process.exit(0);
+    }
+    let alive = false;
+    try {
+      process.kill(state.pid, 0);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+    console.log(
+      alive ? chalk.green("Listener running") : chalk.red("Listener stopped"),
+    );
+    console.log(chalk.dim(`  PID:    ${state.pid}`));
+    console.log(chalk.dim(`  Port:   ${state.port}`));
+    console.log(chalk.dim(`  Tunnel: ${state.tunnelUrl}`));
+    console.log(chalk.dim(`  Since:  ${state.startedAt}`));
+    process.exit(0);
+  }
+
+  // Default: start
+  const args =
+    subcommand === "start" ? rest : [subcommand, ...rest].filter(Boolean);
+  const portFlag = args.indexOf("--port");
+  const port =
+    portFlag !== -1 && args[portFlag + 1] ? parseInt(args[portFlag + 1]) : 0;
+
+  const { startCallbackServer } = await import("./core/listener.js");
+  const { startTunnel } = await import("./core/tunnel.js");
+
+  const { port: resolvedPort, server } = await startCallbackServer(port);
+
+  let tunnelUrl: string;
+  try {
+    console.log(chalk.dim("Starting cloudflared tunnel..."));
+    tunnelUrl = await startTunnel(resolvedPort);
+  } catch (err) {
+    server.close();
+    console.error(chalk.red((err as Error).message));
+    process.exit(1);
+  }
+
+  saveListenerState({
+    pid: process.pid,
+    port: resolvedPort,
+    tunnelUrl,
+    startedAt: new Date().toISOString(),
+  });
+
+  console.log(chalk.green("\nCallback listener running:"));
+  console.log(chalk.dim(`  Local:  http://localhost:${resolvedPort}`));
+  console.log(chalk.dim(`  Tunnel: ${tunnelUrl}`));
+  console.log(
+    chalk.dim("\nClay will POST enrichment results to: <tunnel>/callback/<id>"),
+  );
+  console.log(chalk.dim("Press Ctrl+C to stop.\n"));
+
+  await new Promise<void>((res) => {
+    const shutdown = () => {
+      server.close();
+      res();
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  });
+  process.exit(0);
+}
+
+// ── usage ───────────────────────────────────────────────────────────────────
+
+if (command === "usage") {
+  const chalk = (await import("chalk")).default;
+  const { loadTables } = await import("./core/tables.js");
+  const { getTableUsage } = await import("./core/usage.js");
+
+  const name = subcommand;
+  if (name && name !== "show") {
+    const usage = getTableUsage(name);
+    const pct =
+      usage.limit > 0 ? Math.round((usage.count / usage.limit) * 100) : 0;
+    console.log(chalk.cyan(name));
+    console.log(`  Rows:      ${usage.count}/${usage.limit} (${pct}%)`);
+    console.log(`  Remaining: ${usage.limit - usage.count}`);
+    if (usage.lastFired) console.log(`  Last fired: ${usage.lastFired}`);
+    process.exit(0);
+  }
+
+  const store = loadTables();
+  const tables = Object.values(store.tables);
+  if (tables.length === 0) {
+    console.log(chalk.yellow("No tables registered."));
+    process.exit(0);
+  }
+  for (const t of tables) {
+    const usage = getTableUsage(t.name);
+    const pct = Math.round((usage.count / t.rowLimit) * 100);
+    const color =
+      pct >= 90 ? chalk.red : pct >= 70 ? chalk.yellow : chalk.green;
+    console.log(
+      `${chalk.cyan(t.name)}  ${color(`${usage.count}/${t.rowLimit}`)} (${pct}%)`,
+    );
+  }
+  process.exit(0);
+}
+
+// ── dedup ───────────────────────────────────────────────────────────────────
+
+if (command === "dedup") {
+  const chalk = (await import("chalk")).default;
+
+  if (platform() !== "darwin") {
+    console.error(chalk.red("dedup requires macOS (AppleScript + Chrome)."));
+    process.exit(1);
+  }
+
+  const args = subcommand ? [subcommand, ...rest] : rest;
   const getFlag = (f: string) => {
     const i = args.indexOf(f);
     return i !== -1 && i + 1 < args.length ? args[i + 1] : undefined;
@@ -84,14 +468,14 @@ if (command === "dedup") {
     if (dryRun) {
       console.log(
         chalk.yellow(
-          `\nDry run — ${result.duplicatesRemoved} duplicate rows found`,
+          `\nDry run: ${result.duplicatesRemoved} duplicate rows found`,
         ),
       );
       console.log(
         chalk.dim(`Table: ${result.tableId}, Total rows: ${result.totalRows}`),
       );
     } else if (result.duplicatesRemoved === 0) {
-      console.log(chalk.green("\nNo duplicates found — Clay table is clean"));
+      console.log(chalk.green("\nNo duplicates found. Clay table is clean."));
     } else {
       console.log(
         chalk.green(`\nRemoved ${result.duplicatesRemoved} duplicate rows`),
@@ -116,13 +500,13 @@ if (command === "dedup") {
   process.exit(0);
 }
 
-// ── sync: unified source sync to Clay ────────────────────────────────────────
+// ── sync ────────────────────────────────────────────────────────────────────
 
-if (command === "sync" || !command) {
+if (command === "sync") {
   const chalk = (await import("chalk")).default;
   const ora = (await import("ora")).default;
 
-  const args = rest;
+  const args = subcommand ? [subcommand, ...rest] : rest;
   const getFlag = (f: string) => {
     const i = args.indexOf(f);
     return i !== -1 && i + 1 < args.length ? args[i + 1] : undefined;
@@ -131,6 +515,7 @@ if (command === "sync" || !command) {
 
   const sourcesRaw = getFlag("--sources") ?? "all";
   const csvFlag = getFlag("--csv");
+  const tableFlag = getFlag("--table");
   const webhookFlag = getFlag("--webhook");
   const resyncAll = hasFlag("--all");
   const dryRun = hasFlag("--dry-run");
@@ -142,27 +527,49 @@ if (command === "sync" || !command) {
       : sourcesRaw.split(",").map((s) => s.trim().toLowerCase());
 
   const { mergeRecords } = await import("./core/merge.js");
-  const { postToClay } = await import("./core/clay.js");
   const { loadConfig, saveConfig } = await import("./core/config.js");
 
-  const config = loadConfig();
-  const webhookUrl =
-    webhookFlag ?? config.clayWebhookUrl ?? process.env.CLAY_WEBHOOK_URL ?? "";
+  // Resolve webhook URL: --table (registered) > --webhook (raw) > env
+  let webhookUrl = "";
+  let tableName = "";
+  let rowLimit = 50000;
+
+  if (tableFlag) {
+    const { getTable } = await import("./core/tables.js");
+    const table = getTable(tableFlag);
+    if (!table) {
+      console.error(
+        chalk.red(
+          `Table "${tableFlag}" not found. Register it first: tables add`,
+        ),
+      );
+      process.exit(1);
+    }
+    webhookUrl = table.webhookUrl;
+    tableName = table.name;
+    rowLimit = table.rowLimit;
+  } else {
+    const config = loadConfig();
+    webhookUrl =
+      webhookFlag ??
+      config.clayWebhookUrl ??
+      process.env.CLAY_WEBHOOK_URL ??
+      "";
+  }
 
   if (!webhookUrl && !dryRun) {
     console.error(
       chalk.red(
-        "No Clay webhook URL. Pass --webhook <url> or set CLAY_WEBHOOK_URL in .env",
+        "No Clay webhook URL. Use --table <name>, --webhook <url>, or set CLAY_WEBHOOK_URL in .env",
       ),
     );
     process.exit(1);
   }
 
-  // Import the PersonRecord type for proper typing
   type PR = import("./core/types.js").PersonRecord;
   const batches: PR[][] = [];
 
-  // ── LinkedIn ────────────────────────────────────────────────────────────────
+  // ── LinkedIn ──────────────────────────────────────────────────────────────
 
   if (sources.includes("linkedin")) {
     const spinner = ora("LinkedIn: loading connections...").start();
@@ -189,7 +596,7 @@ if (command === "sync" || !command) {
       } else if (platform() === "darwin") {
         const { scrapeViaAppleScript } =
           await import("./linkedin/scraper-applescript.js");
-        spinner.info("LinkedIn: no CSV found — connecting to Chrome scraper");
+        spinner.info("LinkedIn: no CSV found. Connecting to Chrome scraper");
         spinner.info(
           "  Open linkedin.com/mynetwork/invite-connect/connections/ in Chrome first",
         );
@@ -213,7 +620,7 @@ if (command === "sync" || !command) {
     }
   }
 
-  // ── iMessage ────────────────────────────────────────────────────────────────
+  // ── iMessage ──────────────────────────────────────────────────────────────
 
   if (sources.includes("imessage")) {
     const spinner = ora("iMessage: reading chat.db...").start();
@@ -228,7 +635,7 @@ if (command === "sync" || !command) {
     }
   }
 
-  // ── iOS Contacts ─────────────────────────────────────────────────────────────
+  // ── iOS Contacts ──────────────────────────────────────────────────────────
 
   if (sources.includes("contacts")) {
     const spinner = ora("Contacts: reading AddressBook...").start();
@@ -249,7 +656,7 @@ if (command === "sync" || !command) {
     process.exit(0);
   }
 
-  // ── Merge + dedup ─────────────────────────────────────────────────────────────
+  // ── Merge + dedup ─────────────────────────────────────────────────────────
 
   const mergeSpinner = ora("Merging and deduplicating...").start();
   const merged = mergeRecords(batches);
@@ -262,14 +669,15 @@ if (command === "sync" || !command) {
     );
   }
 
-  // ── Dry run ────────────────────────────────────────────────────────────────
+  // ── Dry run ───────────────────────────────────────────────────────────────
 
+  const config = loadConfig();
   if (dryRun) {
     const alreadySynced = new Set(config.syncedIds);
     const newCount = merged.filter(
       (r) => !alreadySynced.has(r.submission_id),
     ).length;
-    console.log(chalk.yellow("\nDry run — not posting to Clay"));
+    console.log(chalk.yellow("\nDry run. Not posting to Clay."));
     console.log(`  ${newCount} new people would be added`);
     console.log(`  ${merged.length - newCount} already synced`);
     if (verbose) {
@@ -286,7 +694,9 @@ if (command === "sync" || !command) {
     process.exit(0);
   }
 
-  // ── Post to Clay ─────────────────────────────────────────────────────────────
+  // ── Post to Clay ──────────────────────────────────────────────────────────
+
+  const { postToClay } = await import("./core/clay.js");
 
   const alreadySynced = resyncAll
     ? new Set<string>()
@@ -295,7 +705,7 @@ if (command === "sync" || !command) {
 
   if (toPost.length === 0) {
     console.log(
-      chalk.green("\nAll contacts already synced — nothing new to send"),
+      chalk.green("\nAll contacts already synced. Nothing new to send."),
     );
     process.exit(0);
   }
@@ -311,10 +721,10 @@ if (command === "sync" || !command) {
       i++;
       const icon =
         status === "sent"
-          ? chalk.green("✓")
+          ? chalk.green("*")
           : status === "skipped"
             ? chalk.dim("-")
-            : chalk.red("✗");
+            : chalk.red("x");
       process.stdout.write(
         `\r${icon} [${i}/${toPost.length}] ${name.padEnd(40)}`,
       );
@@ -328,6 +738,12 @@ if (command === "sync" || !command) {
   if (result.failed.length > 0)
     console.log(chalk.red(`Failed: ${result.failed.length}`));
 
+  // Track usage if using a registered table
+  if (tableName && result.sent > 0) {
+    const { trackFireBulk } = await import("./core/usage.js");
+    trackFireBulk(tableName, rowLimit, result.sent);
+  }
+
   config.syncedIds = Array.from(alreadySynced);
   config.lastSyncedAt = new Date().toISOString();
   if (webhookUrl) config.clayWebhookUrl = webhookUrl;
@@ -337,14 +753,31 @@ if (command === "sync" || !command) {
   process.exit(0);
 }
 
-// ── Unknown command ────────────────────────────────────────────────────────────
+// ── help ────────────────────────────────────────────────────────────────────
 
 console.error(`Unknown command: ${command ?? "(none)"}`);
 console.error("");
-console.error("Usage:");
-console.error("  bun src/cli.ts imessage --mode scan");
-console.error("  bun src/cli.ts imessage --mode run");
-console.error("  bun src/cli.ts sync --sources all");
-console.error("  bun src/cli.ts sync --sources linkedin,imessage,contacts");
-console.error("  bun src/cli.ts dedup");
+console.error("Commands:");
+console.error(
+  "  sync              Sync sources to Clay (LinkedIn, iMessage, Contacts)",
+);
+console.error("  tables            Manage registered Clay webhook tables");
+console.error("  fire              Fire a JSON payload to a registered table");
+console.error(
+  "  listen            Start/check callback listener for Clay enrichment",
+);
+console.error("  usage             Show row usage per table");
+console.error("  imessage          Full iMessage agent");
+console.error("  dedup             Remove duplicate rows from Clay table");
+console.error("");
+console.error("Examples:");
+console.error(
+  "  bun src/cli.ts tables add --name leads --webhook-url https://api.clay.com/v3/sources/webhook/...",
+);
+console.error(
+  "  bun src/cli.ts sync --sources linkedin,contacts --table leads",
+);
+console.error('  bun src/cli.ts fire leads --data \'{"linkedin_url": "..."}\'');
+console.error("  bun src/cli.ts listen start");
+console.error("  bun src/cli.ts usage");
 process.exit(1);

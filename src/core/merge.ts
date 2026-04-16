@@ -50,6 +50,28 @@ export function mergeRecords(batches: PersonRecord[][]): PersonRecord[] {
     if (!existing && email) existing = byEmail.get(email);
     if (!existing && li) existing = byLinkedIn.get(li);
 
+    // Name fallback: match only across different sources, and only when the
+    // candidate fields don't conflict with an existing record. This catches
+    // "same person, LinkedIn CSV has no phone and Contacts has no LinkedIn"
+    // without collapsing two different people who share a name.
+    if (!existing) {
+      const nameKey = record.name.toLowerCase().trim();
+      const candidate = byName.get(nameKey);
+      if (candidate) {
+        const candidateLi = linkedinSlug(candidate.linkedin_url);
+        const candidatePhone = normalizePhone(candidate.phone);
+        const differentSources = record.sources.some(
+          (s) => !candidate.sources.includes(s),
+        );
+        const liConflict = li && candidateLi && li !== candidateLi;
+        const phoneConflict =
+          phone && candidatePhone && phone !== candidatePhone;
+        if (differentSources && !liConflict && !phoneConflict) {
+          existing = candidate;
+        }
+      }
+    }
+
     if (existing) {
       // Merge into existing
       for (const src of record.sources) {

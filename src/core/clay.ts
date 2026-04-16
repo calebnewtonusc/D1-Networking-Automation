@@ -18,7 +18,10 @@ async function postWithRetry(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
     });
-    if (res.status === 429 && attempt < RETRY_DELAYS.length) {
+    if (
+      (res.status === 429 || res.status >= 500) &&
+      attempt < RETRY_DELAYS.length
+    ) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt]));
       return postWithRetry(url, body, attempt + 1);
     }

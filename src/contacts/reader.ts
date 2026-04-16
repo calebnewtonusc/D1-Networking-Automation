@@ -92,27 +92,35 @@ export function readContacts(): PersonRecord[] {
         const phone = normalizePhone(row.fullNumber);
         if (!phone) continue;
 
-        const key = phone;
-        if (seen.has(key)) continue;
-
         const [firstName = "", ...rest] = name.split(" ");
+        const email = row.email?.toLowerCase().trim() || undefined;
+        const company = row.org?.trim() || undefined;
+        const existing = seen.get(phone);
 
-        seen.set(key, {
+        if (existing) {
+          if (!existing.email && email) existing.email = email;
+          if (!existing.company && company) existing.company = company;
+          continue;
+        }
+
+        seen.set(phone, {
           submission_id: phone,
           name,
           first_name: firstName,
           last_name: rest.join(" ") || undefined,
           phone,
-          email: row.email?.toLowerCase().trim() || undefined,
-          company: row.org?.trim() || undefined,
+          email,
+          company,
           sources: ["contacts"],
           imported_at: now,
         });
       }
 
       db.close();
-    } catch {
-      // DB locked or unavailable — skip this source
+    } catch (err) {
+      console.error(
+        `[contacts] failed to read ${source}: ${(err as Error).message}`,
+      );
     }
   }
 

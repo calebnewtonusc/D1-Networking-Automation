@@ -1,4 +1,4 @@
-import { createReadStream } from "fs";
+import { readFileSync } from "fs";
 import { parse } from "csv-parse";
 
 export interface LinkedInConnection {
@@ -33,9 +33,8 @@ function makeId(url: string, first: string, last: string): string {
 }
 
 export async function parseLinkedInCsv(
-  filePath: string
+  filePath: string,
 ): Promise<LinkedInConnection[]> {
-  const { readFileSync } = await import("fs");
   const raw = readFileSync(filePath, "utf-8");
   const lines = raw.split("\n");
   const headerIdx = findHeaderIndex(lines);
@@ -50,21 +49,16 @@ export async function parseLinkedInCsv(
 
         const connections: LinkedInConnection[] = [];
         for (const row of records) {
-          const first =
-            row["First Name"] ?? row["FirstName"] ?? "";
+          const first = row["First Name"] ?? row["FirstName"] ?? "";
           const last = row["Last Name"] ?? row["LastName"] ?? "";
           if (!first && !last) continue;
 
           const url =
             row["URL"] ?? row["Profile URL"] ?? row["LinkedIn URL"] ?? "";
-          const email =
-            row["Email Address"] ?? row["Email"] ?? "";
-          const company =
-            row["Company"] ?? row["Company Name"] ?? "";
-          const position =
-            row["Position"] ?? row["Title"] ?? "";
-          const connectedOn =
-            row["Connected On"] ?? row["ConnectedOn"] ?? "";
+          const email = row["Email Address"] ?? row["Email"] ?? "";
+          const company = row["Company"] ?? row["Company Name"] ?? "";
+          const position = row["Position"] ?? row["Title"] ?? "";
+          const connectedOn = row["Connected On"] ?? row["ConnectedOn"] ?? "";
 
           connections.push({
             submissionId: makeId(url, first, last),
@@ -80,7 +74,7 @@ export async function parseLinkedInCsv(
           });
         }
         resolve(connections);
-      }
+      },
     );
   });
 }

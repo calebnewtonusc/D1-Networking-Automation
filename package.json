@@ -6,6 +6,11 @@
   "scripts": {
     "imessage": "bun src/cli.ts imessage",
     "sync": "bun src/cli.ts sync",
+    "tables": "bun src/cli.ts tables",
+    "fire": "bun src/cli.ts fire",
+    "listen": "bun src/cli.ts listen",
+    "usage": "bun src/cli.ts usage",
+    "dedup": "bun src/cli.ts dedup",
     "dev": "bun src/cli.ts"
   },
   "dependencies": {
