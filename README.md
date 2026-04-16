@@ -1,8 +1,8 @@
 # D1 Networking Automation
 
-Your entire network synced to Clay. LinkedIn connections, iMessage threads, and iOS Contacts: merged, deduplicated, and posted to one table so you always know who you know, how you met, and when you last talked.
+Your entire network in one CLI. LinkedIn Voyager API, iMessage agent, iOS Contacts, all synced to Clay with cross-source deduplication, row limit tracking, and async enrichment callbacks.
 
-Includes a full table registry, row limit tracking, webhook fire command with async callback support, and a cloudflared tunnel listener for receiving Clay enrichment data.
+43 LinkedIn API commands. Full iMessage triage and auto-reply. Apple Contacts reader. Multi-table Clay registry with webhook fire, usage tracking, and cloudflared tunnel listener.
 
 ---
 
@@ -11,7 +11,8 @@ Includes a full table registry, row limit tracking, webhook fire command with as
 - **macOS only.** iMessage, iOS Contacts, and the LinkedIn Chrome scraper all require macOS.
 - **Full Disk Access** granted to your terminal app. System Settings > Privacy & Security > Full Disk Access.
 - **Bun** installed: `curl -fsSL https://bun.sh/install | bash`
-- **Anthropic API key** for the iMessage agent only
+- **Anthropic API key** for the iMessage agent
+- **LinkedIn cookies** (li_at + JSESSIONID) for the LinkedIn API
 - **Clay webhook URL** for syncing to Clay (or register a table with the CLI)
 
 ---
@@ -30,15 +31,175 @@ cp .env.example .env
 
 ## Commands
 
-| Command    | What it does                                             |
-| ---------- | -------------------------------------------------------- |
-| `sync`     | Sync LinkedIn/iMessage/Contacts to a Clay table          |
-| `tables`   | Manage registered Clay webhook tables                    |
-| `fire`     | Fire a JSON payload to a registered table                |
-| `listen`   | Start callback listener for Clay enrichment results      |
-| `usage`    | Show row usage per table                                 |
-| `imessage` | Full iMessage agent (triage, auto-reply, memory, digest) |
-| `dedup`    | Remove duplicate rows from a Clay table via Chrome       |
+| Command    | What it does                                                         |
+| ---------- | -------------------------------------------------------------------- |
+| `sync`     | Sync LinkedIn/iMessage/Contacts to a Clay table                      |
+| `tables`   | Manage registered Clay webhook tables                                |
+| `fire`     | Fire a JSON payload to a registered table                            |
+| `listen`   | Start callback listener for Clay enrichment results                  |
+| `usage`    | Show row usage per table                                             |
+| `linkedin` | 43 LinkedIn Voyager API commands (profile, search, messaging, posts) |
+| `imessage` | Full iMessage agent (triage, auto-reply, memory, digest)             |
+| `dedup`    | Remove duplicate rows from a Clay table via Chrome                   |
+
+---
+
+## LinkedIn API
+
+Full access to LinkedIn's Voyager API using cookie session auth. 43 commands across 10 categories.
+
+### Authentication
+
+Grab your cookies from Chrome DevTools (Application > Cookies > linkedin.com):
+
+```bash
+bun src/cli.ts linkedin login --li-at <li_at_cookie> --jsessionid <jsessionid_cookie>
+
+# Check login status
+bun src/cli.ts linkedin status
+bun src/cli.ts linkedin status --verify
+
+# Remove stored cookies
+bun src/cli.ts linkedin logout
+```
+
+Cookies can also be set via environment variables: `LINKEDIN_LI_AT` and `LINKEDIN_JSESSIONID`.
+
+### Profile (9 commands)
+
+```bash
+bun src/cli.ts linkedin profile me
+bun src/cli.ts linkedin profile view johndoe
+bun src/cli.ts linkedin profile contact-info johndoe
+bun src/cli.ts linkedin profile skills johndoe --limit 50
+bun src/cli.ts linkedin profile network johndoe
+bun src/cli.ts linkedin profile badges johndoe
+bun src/cli.ts linkedin profile privacy johndoe
+bun src/cli.ts linkedin profile posts <urn-id> --limit 20
+bun src/cli.ts linkedin profile disconnect johndoe
+```
+
+### Connections (7 commands)
+
+```bash
+# Send a connection request
+bun src/cli.ts linkedin connections send ACoAABxxxxxxx --message "Would love to connect"
+
+# View pending invitations
+bun src/cli.ts linkedin connections received
+bun src/cli.ts linkedin connections sent
+
+# Manage invitations
+bun src/cli.ts linkedin connections accept <id> --secret <secret>
+bun src/cli.ts linkedin connections reject <id> --secret <secret>
+bun src/cli.ts linkedin connections withdraw <id>
+bun src/cli.ts linkedin connections remove johndoe
+```
+
+### Search (4 commands)
+
+```bash
+# Search people with filters
+bun src/cli.ts linkedin search people --keywords "software engineer" --network F --company 1035
+
+# Search companies
+bun src/cli.ts linkedin search companies --keywords "AI startups"
+
+# Search jobs
+bun src/cli.ts linkedin search jobs --keywords "product manager" --location "Los Angeles" --remote
+
+# Search posts
+bun src/cli.ts linkedin search posts --keywords "AI trends 2026"
+```
+
+Search filters: `--network` (F=1st, S=2nd, O=3rd+), `--company`, `--industry`, `--school`, `--title`, `--first-name`, `--last-name`, `--geo`, `--limit`, `--start`.
+
+### Messaging (6 commands)
+
+```bash
+# List conversations
+bun src/cli.ts linkedin messaging conversations
+
+# View conversation with a specific person
+bun src/cli.ts linkedin messaging conversation-with ACoAABxxxxxxx
+
+# Read messages from a conversation
+bun src/cli.ts linkedin messaging messages <conversation-id>
+
+# Send message in existing conversation
+bun src/cli.ts linkedin messaging send <conversation-id> --text "Hey, following up"
+
+# Start a new conversation
+bun src/cli.ts linkedin messaging send-new --recipients ACoAABxxxxxxx --text "Hi there"
+
+# Mark conversation as read
+bun src/cli.ts linkedin messaging mark-read <conversation-id>
+```
+
+### Posts (3 commands)
+
+```bash
+# Create a post
+bun src/cli.ts linkedin posts create --text "Hello LinkedIn!" --visibility anyone
+
+# Create with image
+bun src/cli.ts linkedin posts create --text "Check this out" --image ./photo.jpg
+
+# Edit a post
+bun src/cli.ts linkedin posts edit <share-urn> --text "Updated text"
+
+# Delete a post
+bun src/cli.ts linkedin posts delete <share-urn>
+```
+
+### Feed (3 commands)
+
+```bash
+bun src/cli.ts linkedin feed view --limit 20
+bun src/cli.ts linkedin feed user johndoe --limit 10
+bun src/cli.ts linkedin feed company google --limit 10
+```
+
+### Engage (4 commands)
+
+```bash
+# React to a post
+bun src/cli.ts linkedin engage react <post-urn> --type LIKE
+# Types: LIKE, PRAISE, APPRECIATION, EMPATHY, INTEREST, ENTERTAINMENT
+
+# View reactions
+bun src/cli.ts linkedin engage reactions <post-urn>
+
+# Comment on a post
+bun src/cli.ts linkedin engage comment <post-urn> --text "Great insight"
+
+# View comments
+bun src/cli.ts linkedin engage comments <post-urn>
+```
+
+### Company (3 commands)
+
+```bash
+bun src/cli.ts linkedin company view google
+bun src/cli.ts linkedin company people <company-id> --limit 25
+bun src/cli.ts linkedin company jobs <company-id>
+```
+
+### Analytics (2 commands)
+
+```bash
+bun src/cli.ts linkedin analytics profile-views
+bun src/cli.ts linkedin analytics search-appearances
+```
+
+### Jobs (4 commands)
+
+```bash
+bun src/cli.ts linkedin jobs search --keywords "software engineer" --location "San Francisco" --remote
+bun src/cli.ts linkedin jobs view <job-id>
+bun src/cli.ts linkedin jobs save <job-id>
+bun src/cli.ts linkedin jobs unsave <job-id>
+```
 
 ---
 
@@ -124,7 +285,7 @@ Match priority:
 1. Phone number (E.164 normalized)
 2. Email address
 3. LinkedIn URL slug
-4. Name match across different sources (only when fields don't conflict)
+4. Name match across different sources (emoji-stripped, only when fields don't conflict)
 
 ---
 
@@ -160,8 +321,6 @@ bun src/cli.ts listen status
 ```
 
 Requires `cloudflared` installed: `brew install cloudflared`
-
-The listener stores callback results in memory. The `fire --wait` command polls `http://localhost:<port>/callback/<id>` until the result arrives or the timeout expires.
 
 ---
 
@@ -252,54 +411,47 @@ Clay deduplicates on `submission_id`. Re-running sync only adds new people.
 
 ---
 
-## Dedup Clay table
-
-Remove duplicate rows from your Clay table directly (macOS only, requires Clay open in Chrome):
-
-```bash
-bun src/cli.ts dedup
-bun src/cli.ts dedup --dry-run
-```
-
----
-
 ## Architecture
 
 ```
 src/
-  cli.ts                  Entry point: sync, tables, fire, listen, usage, imessage, dedup
+  cli.ts                    Entry point: all commands routed here
   core/
-    types.ts              PersonRecord schema
-    merge.ts              Cross-source deduplication (phone, email, LinkedIn slug, name)
-    clay.ts               Webhook poster with retry and rate limiting
-    client.ts             HTTP client (retries on 429/5xx, backoff, timeouts)
-    tables.ts             Table registry, usage tracking, listener state (~/.d1-networking/)
-    usage.ts              Row limit tracking (90% warn, 100% error)
-    errors.ts             Typed error hierarchy (WebhookError, TimeoutError, LimitError)
-    listener.ts           HTTP callback server for Clay enrichment results
-    tunnel.ts             cloudflared tunnel spawner
-    config.ts             Legacy sync state (~/.d1-networking.json)
-    dedup-clay.ts         Clay table dedup via Chrome session
-  imessage/
-    agent.ts              Triage, reply, memory, style learning
-    clay-export.ts        Reads chat.db for Clay sync
-    contacts.ts           AddressBook resolver
-    convo.ts              Conversation threading
-    db.ts                 chat.db SQLite reader
-    memory.ts             Contact profile persistence
-    intent.ts             Intent classifier
-    integrations.ts       Slack, Firestore, Clay CRM
-    perplexity.ts         Web research on unknown contacts
+    types.ts                PersonRecord schema
+    merge.ts                Cross-source dedup (phone, email, LinkedIn slug, name)
+    clay.ts                 Webhook poster with retry and rate limiting
+    client.ts               HTTP client (retries on 429/5xx, backoff, timeouts)
+    tables.ts               Table registry, usage tracking, listener state
+    usage.ts                Row limit tracking (90% warn, 100% error)
+    errors.ts               Typed error hierarchy
+    listener.ts             HTTP callback server for Clay enrichment results
+    tunnel.ts               cloudflared tunnel spawner
+    config.ts               Sync state persistence (~/.d1-networking.json)
+    dedup-clay.ts           Clay table dedup via Chrome session
   linkedin/
-    parse.ts              CSV parser
-    adapter.ts            CSV/scraped to PersonRecord
-    finder.ts             Auto-detects Connections.csv in ~/Downloads
-    scraper.ts            Playwright scraper (cross-platform fallback)
+    api/
+      client.ts             Voyager API client (cookie auth, CSRF, rate limiting)
+      commands.ts           All 43 LinkedIn command handlers
+      config.ts             LinkedIn session persistence (~/.d1-networking/linkedin.json)
+    parse.ts                CSV parser for LinkedIn data export
+    adapter.ts              CSV/scraped to PersonRecord
+    finder.ts               Auto-detects Connections.csv in ~/Downloads
+    scraper.ts              Playwright scraper (cross-platform fallback)
     scraper-applescript.ts  Chrome scraper via AppleScript (macOS)
+  imessage/
+    agent.ts                Triage, reply, memory, style learning
+    clay-export.ts          Reads chat.db for Clay sync
+    contacts.ts             AddressBook resolver
+    convo.ts                Conversation threading
+    db.ts                   chat.db SQLite reader
+    memory.ts               Contact profile persistence
+    intent.ts               Intent classifier
+    integrations.ts         Slack, Firestore, Clay CRM
+    perplexity.ts           Web research on unknown contacts
   contacts/
-    reader.ts             AddressBook SQLite reader
+    reader.ts               AddressBook SQLite reader
 packages/
-  photon-imessage-kit/    Bundled iMessage SDK (reads chat.db, sends via AppleScript)
+  photon-imessage-kit/      Bundled iMessage SDK
 ```
 
 ---
@@ -312,6 +464,10 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 # Required for Clay sync (if not using registered tables)
 CLAY_WEBHOOK_URL=https://api.clay.com/v3/sources/webhook/...
+
+# LinkedIn API (alternative to `linkedin login`)
+LINKEDIN_LI_AT=AQE...
+LINKEDIN_JSESSIONID=ajax:123456789
 
 # Optional: Perplexity web research on unknown contacts
 PERPLEXITY_API_KEY=pplx-...
