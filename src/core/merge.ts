@@ -24,6 +24,23 @@ function linkedinSlug(url: string | undefined): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
+function normalizeName(name: string): string {
+  return name
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase()
+    .trim();
+}
+
+function nameKey(record: PersonRecord): string {
+  if (record.first_name && record.last_name) {
+    const fn = normalizeName(record.first_name);
+    const ln = normalizeName(record.last_name);
+    if (fn && ln) return `${fn} ${ln}`;
+  }
+  return normalizeName(record.name);
+}
+
 /**
  * Merge multiple PersonRecord arrays into one deduplicated list.
  * When the same person appears in multiple sources, their records are merged:
@@ -55,8 +72,8 @@ export function mergeRecords(batches: PersonRecord[][]): PersonRecord[] {
     // "same person, LinkedIn CSV has no phone and Contacts has no LinkedIn"
     // without collapsing two different people who share a name.
     if (!existing) {
-      const nameKey = record.name.toLowerCase().trim();
-      const candidate = byName.get(nameKey);
+      const nk = nameKey(record);
+      const candidate = nk.length >= 3 ? byName.get(nk) : undefined;
       if (candidate) {
         const candidateLi = linkedinSlug(candidate.linkedin_url);
         const candidatePhone = normalizePhone(candidate.phone);
@@ -76,6 +93,13 @@ export function mergeRecords(batches: PersonRecord[][]): PersonRecord[] {
       // Merge into existing
       for (const src of record.sources) {
         if (!existing.sources.includes(src)) existing.sources.push(src);
+      }
+      // Prefer the cleaner name (no emoji, no extra descriptors)
+      if (
+        record.name.length < existing.name.length &&
+        normalizeName(record.name) === normalizeName(existing.name)
+      ) {
+        existing.name = record.name;
       }
       // Fill in missing fields
       if (!existing.phone && phone) existing.phone = phone;
@@ -108,7 +132,7 @@ export function mergeRecords(batches: PersonRecord[][]): PersonRecord[] {
     if (existing.email) byEmail.set(existing.email.toLowerCase(), existing);
     const slug = linkedinSlug(existing.linkedin_url);
     if (slug) byLinkedIn.set(slug, existing);
-    byName.set(existing.name.toLowerCase().trim(), existing);
+    byName.set(nameKey(existing), existing);
   }
 
   // Sort: sources with most connections first, then alphabetical

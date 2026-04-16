@@ -430,6 +430,521 @@ if (command === "usage") {
   process.exit(0);
 }
 
+// ── linkedin ────────────────────────────────────────────────────────────────
+
+if (command === "linkedin" || command === "li") {
+  const chalk = (await import("chalk")).default;
+  const { resolveAuth, createClient } =
+    await import("./linkedin/api/client.js");
+  const { saveLinkedInConfig, deleteLinkedInConfig, loadLinkedInConfig } =
+    await import("./linkedin/api/config.js");
+  const cmds = await import("./linkedin/api/commands.js");
+
+  const allArgs = subcommand ? [subcommand, ...rest] : rest;
+  const sub = allArgs[0];
+  const sub2 = allArgs[1];
+  const args = allArgs.slice(2);
+  const getFlag = (f: string) => {
+    const i = args.indexOf(f);
+    return i !== -1 && i + 1 < args.length ? args[i + 1] : undefined;
+  };
+  const hasFlag = (f: string) => args.includes(f);
+  const getArg = (idx: number) => allArgs[idx + 2];
+
+  function printJson(data: unknown) {
+    console.log(JSON.stringify(data, null, 2));
+  }
+
+  // ── login ───────────────
+  if (sub === "login") {
+    const liAt = getFlag("--li-at") ?? allArgs[1];
+    const jsessionid = getFlag("--jsessionid") ?? allArgs[2];
+
+    if (!liAt || !jsessionid) {
+      console.error(
+        chalk.red(
+          "Usage: linkedin login --li-at <cookie> --jsessionid <cookie>",
+        ),
+      );
+      console.error(
+        chalk.dim(
+          "  Get these from browser DevTools: Application > Cookies > linkedin.com",
+        ),
+      );
+      process.exit(1);
+    }
+
+    const cleanJsession = jsessionid.replace(/^"/, "").replace(/"$/, "");
+    saveLinkedInConfig({ li_at: liAt, jsessionid: cleanJsession });
+
+    try {
+      const client = createClient({ liAt, jsessionid: cleanJsession });
+      const me = (await cmds.profileMe(client)) as Record<string, unknown>;
+      const name =
+        [me?.firstName, me?.lastName].filter(Boolean).join(" ") || "Unknown";
+      const urn =
+        (me?.entityUrn as string) ?? (me?.publicIdentifier as string) ?? "";
+      saveLinkedInConfig({
+        li_at: liAt,
+        jsessionid: cleanJsession,
+        profile_name: name,
+        profile_urn: urn,
+      });
+      console.log(chalk.green(`Logged in as ${name}`));
+      console.log(chalk.dim(`  URN: ${urn}`));
+    } catch (err) {
+      console.log(
+        chalk.yellow(
+          `Cookies saved but validation failed: ${(err as Error).message}`,
+        ),
+      );
+    }
+    process.exit(0);
+  }
+
+  if (sub === "logout") {
+    deleteLinkedInConfig();
+    console.log(chalk.green("Logged out. Session cookies removed."));
+    process.exit(0);
+  }
+
+  if (sub === "status") {
+    const config = loadLinkedInConfig();
+    if (!config?.li_at) {
+      console.log(chalk.yellow("Not logged in. Run: linkedin login"));
+      process.exit(0);
+    }
+    console.log(chalk.green("Logged in"));
+    console.log(chalk.dim(`  Profile: ${config.profile_name ?? "Unknown"}`));
+    console.log(chalk.dim(`  URN: ${config.profile_urn ?? ""}`));
+
+    if (hasFlag("--verify")) {
+      try {
+        const client = createClient({
+          liAt: config.li_at,
+          jsessionid: config.jsessionid,
+        });
+        await cmds.profileMe(client);
+        console.log(chalk.green("  Session valid"));
+      } catch {
+        console.log(chalk.red("  Session expired. Run: linkedin login"));
+      }
+    }
+    process.exit(0);
+  }
+
+  // All remaining commands need auth
+  let client: ReturnType<typeof createClient>;
+  try {
+    const auth = resolveAuth();
+    client = createClient(auth);
+  } catch (err) {
+    console.error(chalk.red((err as Error).message));
+    process.exit(1);
+  }
+
+  try {
+    // ── profile ───────────────
+    if (sub === "profile") {
+      if (sub2 === "me") {
+        printJson(await cmds.profileMe(client));
+      } else if (sub2 === "view") {
+        printJson(await cmds.profileView(client, getArg(0)!));
+      } else if (sub2 === "contact-info") {
+        printJson(await cmds.profileContactInfo(client, getArg(0)!));
+      } else if (sub2 === "skills") {
+        printJson(
+          await cmds.profileSkills(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "100"),
+          ),
+        );
+      } else if (sub2 === "network") {
+        printJson(await cmds.profileNetwork(client, getArg(0)!));
+      } else if (sub2 === "badges") {
+        printJson(await cmds.profileBadges(client, getArg(0)!));
+      } else if (sub2 === "privacy") {
+        printJson(await cmds.profilePrivacy(client, getArg(0)!));
+      } else if (sub2 === "posts") {
+        printJson(
+          await cmds.profilePosts(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "disconnect") {
+        printJson(await cmds.profileDisconnect(client, getArg(0)!));
+      } else {
+        console.error(
+          chalk.red(
+            "profile: me, view, contact-info, skills, network, badges, privacy, posts, disconnect",
+          ),
+        );
+        process.exit(1);
+      }
+    }
+
+    // ── connections ───────────────
+    else if (sub === "connections") {
+      if (sub2 === "send") {
+        printJson(
+          await cmds.connectionsSend(
+            client,
+            getArg(0)!,
+            getFlag("--message") ?? getFlag("-m"),
+          ),
+        );
+      } else if (sub2 === "received") {
+        printJson(
+          await cmds.connectionsReceived(
+            client,
+            parseInt(getFlag("--limit") ?? "100"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "sent") {
+        printJson(
+          await cmds.connectionsSent(
+            client,
+            parseInt(getFlag("--limit") ?? "100"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "accept") {
+        printJson(
+          await cmds.connectionsAccept(
+            client,
+            getArg(0)!,
+            getFlag("--secret") ?? getFlag("-s") ?? "",
+          ),
+        );
+      } else if (sub2 === "reject") {
+        printJson(
+          await cmds.connectionsReject(
+            client,
+            getArg(0)!,
+            getFlag("--secret") ?? getFlag("-s") ?? "",
+          ),
+        );
+      } else if (sub2 === "withdraw") {
+        printJson(await cmds.connectionsWithdraw(client, getArg(0)!));
+      } else if (sub2 === "remove") {
+        printJson(await cmds.connectionsRemove(client, getArg(0)!));
+      } else {
+        console.error(
+          chalk.red(
+            "connections: send, received, sent, accept, reject, withdraw, remove",
+          ),
+        );
+        process.exit(1);
+      }
+    }
+
+    // ── search ───────────────
+    else if (sub === "search") {
+      if (sub2 === "people") {
+        printJson(
+          await cmds.searchPeople(client, {
+            keywords: getFlag("--keywords") ?? getFlag("-k"),
+            network: (getFlag("--network") ?? getFlag("-n")) as
+              | "F"
+              | "S"
+              | "O"
+              | undefined,
+            company: getFlag("--company"),
+            industry: getFlag("--industry"),
+            school: getFlag("--school"),
+            title: getFlag("--title"),
+            firstName: getFlag("--first-name"),
+            lastName: getFlag("--last-name"),
+            geo: getFlag("--geo"),
+            limit: parseInt(getFlag("--limit") ?? "10"),
+            start: parseInt(getFlag("--start") ?? "0"),
+          }),
+        );
+      } else if (sub2 === "companies") {
+        printJson(
+          await cmds.searchCompanies(
+            client,
+            getFlag("--keywords") ?? getFlag("-k") ?? "",
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "jobs") {
+        printJson(
+          await cmds.searchJobs(client, {
+            keywords: getFlag("--keywords") ?? getFlag("-k") ?? "",
+            location: getFlag("--location"),
+            experience: getFlag("--experience"),
+            jobType: getFlag("--job-type"),
+            remote: hasFlag("--remote"),
+            postedWithin: getFlag("--posted-within"),
+            limit: parseInt(getFlag("--limit") ?? "25"),
+            start: parseInt(getFlag("--start") ?? "0"),
+          }),
+        );
+      } else if (sub2 === "posts") {
+        printJson(
+          await cmds.searchPosts(
+            client,
+            getFlag("--keywords") ?? getFlag("-k") ?? "",
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else {
+        console.error(chalk.red("search: people, companies, jobs, posts"));
+        process.exit(1);
+      }
+    }
+
+    // ── messaging ───────────────
+    else if (sub === "messaging" || sub === "msg") {
+      if (sub2 === "conversations" || sub2 === "inbox") {
+        printJson(await cmds.messagingConversations(client));
+      } else if (sub2 === "conversation-with") {
+        printJson(await cmds.messagingConversationWith(client, getArg(0)!));
+      } else if (sub2 === "messages") {
+        printJson(
+          await cmds.messagingMessages(
+            client,
+            getArg(0)!,
+            getFlag("--before") ? parseInt(getFlag("--before")!) : undefined,
+          ),
+        );
+      } else if (sub2 === "send") {
+        printJson(
+          await cmds.messagingSend(
+            client,
+            getArg(0)!,
+            getFlag("--text") ?? getFlag("-t") ?? "",
+          ),
+        );
+      } else if (sub2 === "send-new") {
+        const recipients = (getFlag("--recipients") ?? getFlag("-r") ?? "")
+          .split(",")
+          .map((r: string) => r.trim());
+        printJson(
+          await cmds.messagingSendNew(
+            client,
+            recipients,
+            getFlag("--text") ?? getFlag("-t") ?? "",
+          ),
+        );
+      } else if (sub2 === "mark-read") {
+        printJson(await cmds.messagingMarkRead(client, getArg(0)!));
+      } else {
+        console.error(
+          chalk.red(
+            "messaging: conversations, conversation-with, messages, send, send-new, mark-read",
+          ),
+        );
+        process.exit(1);
+      }
+    }
+
+    // ── posts ───────────────
+    else if (sub === "posts") {
+      if (sub2 === "create") {
+        printJson(
+          await cmds.postsCreate(
+            client,
+            getFlag("--text") ?? getFlag("-t") ?? "",
+            {
+              visibility: (getFlag("--visibility") ?? getFlag("-v")) as
+                | "anyone"
+                | "connections"
+                | undefined,
+              imagePath: getFlag("--image") ?? getFlag("-i"),
+              commentsScope: getFlag("--comments-scope") as
+                | "all"
+                | "connections"
+                | "none"
+                | undefined,
+            },
+          ),
+        );
+      } else if (sub2 === "edit") {
+        printJson(
+          await cmds.postsEdit(
+            client,
+            getArg(0)!,
+            getFlag("--text") ?? getFlag("-t") ?? "",
+          ),
+        );
+      } else if (sub2 === "delete") {
+        printJson(await cmds.postsDelete(client, getArg(0)!));
+      } else {
+        console.error(chalk.red("posts: create, edit, delete"));
+        process.exit(1);
+      }
+    }
+
+    // ── feed ───────────────
+    else if (sub === "feed") {
+      if (sub2 === "view" || !sub2) {
+        printJson(
+          await cmds.feedView(
+            client,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "user") {
+        printJson(
+          await cmds.feedUser(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "company") {
+        printJson(
+          await cmds.feedCompany(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else {
+        console.error(chalk.red("feed: view, user, company"));
+        process.exit(1);
+      }
+    }
+
+    // ── engage ───────────────
+    else if (sub === "engage") {
+      if (sub2 === "react") {
+        printJson(
+          await cmds.engageReact(
+            client,
+            getArg(0)!,
+            (getFlag("--type") ??
+              getFlag("-t") ??
+              "LIKE") as import("./linkedin/api/commands.js").ReactionType,
+          ),
+        );
+      } else if (sub2 === "reactions") {
+        printJson(
+          await cmds.engageReactions(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "comment") {
+        printJson(
+          await cmds.engageComment(
+            client,
+            getArg(0)!,
+            getFlag("--text") ?? getFlag("-t") ?? "",
+          ),
+        );
+      } else if (sub2 === "comments") {
+        printJson(
+          await cmds.engageComments(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else {
+        console.error(chalk.red("engage: react, reactions, comment, comments"));
+        process.exit(1);
+      }
+    }
+
+    // ── company ───────────────
+    else if (sub === "company") {
+      if (sub2 === "view") {
+        printJson(await cmds.companyView(client, getArg(0)!));
+      } else if (sub2 === "people") {
+        printJson(
+          await cmds.companyPeople(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "10"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else if (sub2 === "jobs") {
+        printJson(
+          await cmds.companyJobs(
+            client,
+            getArg(0)!,
+            parseInt(getFlag("--limit") ?? "25"),
+            parseInt(getFlag("--start") ?? "0"),
+          ),
+        );
+      } else {
+        console.error(chalk.red("company: view, people, jobs"));
+        process.exit(1);
+      }
+    }
+
+    // ── analytics ───────────────
+    else if (sub === "analytics") {
+      if (sub2 === "profile-views") {
+        printJson(await cmds.analyticsProfileViews(client));
+      } else if (sub2 === "search-appearances") {
+        printJson(await cmds.analyticsSearchAppearances(client));
+      } else {
+        console.error(
+          chalk.red("analytics: profile-views, search-appearances"),
+        );
+        process.exit(1);
+      }
+    }
+
+    // ── jobs ───────────────
+    else if (sub === "jobs") {
+      if (sub2 === "view") {
+        printJson(await cmds.jobView(client, getArg(0)!));
+      } else if (sub2 === "save") {
+        printJson(await cmds.jobSave(client, getArg(0)!));
+      } else if (sub2 === "unsave") {
+        printJson(await cmds.jobUnsave(client, getArg(0)!));
+      } else if (sub2 === "search") {
+        printJson(
+          await cmds.searchJobs(client, {
+            keywords: getFlag("--keywords") ?? getFlag("-k") ?? "",
+            location: getFlag("--location"),
+            experience: getFlag("--experience"),
+            jobType: getFlag("--job-type"),
+            remote: hasFlag("--remote"),
+            postedWithin: getFlag("--posted-within"),
+            limit: parseInt(getFlag("--limit") ?? "25"),
+            start: parseInt(getFlag("--start") ?? "0"),
+          }),
+        );
+      } else {
+        console.error(chalk.red("jobs: search, view, save, unsave"));
+        process.exit(1);
+      }
+    } else {
+      console.error(chalk.red(`Unknown linkedin command: ${sub}`));
+      console.error("  login, logout, status, profile, connections, search,");
+      console.error(
+        "  messaging, posts, feed, engage, company, analytics, jobs",
+      );
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error(chalk.red((err as Error).message));
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
 // ── dedup ───────────────────────────────────────────────────────────────────
 
 if (command === "dedup") {
@@ -767,17 +1282,26 @@ console.error(
   "  listen            Start/check callback listener for Clay enrichment",
 );
 console.error("  usage             Show row usage per table");
+console.error("  linkedin          LinkedIn Voyager API (43 commands)");
 console.error("  imessage          Full iMessage agent");
 console.error("  dedup             Remove duplicate rows from Clay table");
 console.error("");
-console.error("Examples:");
+console.error("LinkedIn subcommands:");
+console.error("  linkedin login    Store session cookies (li_at + JSESSIONID)");
 console.error(
-  "  bun src/cli.ts tables add --name leads --webhook-url https://api.clay.com/v3/sources/webhook/...",
+  "  linkedin profile  me, view, contact-info, skills, network, badges, posts",
 );
 console.error(
-  "  bun src/cli.ts sync --sources linkedin,contacts --table leads",
+  "  linkedin connections  send, received, sent, accept, reject, withdraw, remove",
 );
-console.error('  bun src/cli.ts fire leads --data \'{"linkedin_url": "..."}\'');
-console.error("  bun src/cli.ts listen start");
-console.error("  bun src/cli.ts usage");
+console.error("  linkedin search   people, companies, jobs, posts");
+console.error(
+  "  linkedin messaging  conversations, messages, send, send-new, mark-read",
+);
+console.error("  linkedin posts    create, edit, delete");
+console.error("  linkedin feed     view, user, company");
+console.error("  linkedin engage   react, reactions, comment, comments");
+console.error("  linkedin company  view, people, jobs");
+console.error("  linkedin analytics  profile-views, search-appearances");
+console.error("  linkedin jobs     search, view, save, unsave");
 process.exit(1);
